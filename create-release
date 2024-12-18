@@ -10,7 +10,7 @@ archive=
 
 usage()
 {
-	echo <<TXT
+	cat <<TXT
 $pn [options] version"
   --help|-h
     display this text
