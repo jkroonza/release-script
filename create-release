@@ -119,7 +119,7 @@ fi
 
 if ! git tag "v${version}"; then
 	echo "Unable to create a version tag." >&2
-	#exit 2
+	exit 2
 fi
 
 git push "${upstream}" "v${version}" || exit 2
