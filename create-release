@@ -1,0 +1,187 @@
+#! /bin/sh
+
+pn="$0"
+repo="${pwd}"
+project=
+skipgithub=
+upstream=
+
+archive=
+
+usage()
+{
+	echo <<TXT
+$pn [options] version"
+  --help|-h
+    display this text
+  --archive tar|tar.gz|tar.xz|tar.bz2|zip
+    By default we will generate a .tar.gz only, however, this option allows you
+    to generate multiple archive formats.  This option can be specified
+    multiple times.  You can also set a space-separated list using git config
+    release-script.archive to use if no option is given on the command line.
+  --project name
+    This will set the projects export name, this is normally retrieved from git
+    config release-script.project, or derived from the repository path.  It's
+    recommended to use git config release-script.project name to set this
+    permanently rather than use this option.
+  --repo path
+    provide the path to the repository.
+  --skipgithub
+    You can use this to not push the release and artifacts to github.  Useful if you
+	want to test, or isn't actually using github.
+  --upstream reponame
+    Upstream remote, defaults to origin or git config release-script.upstream
+TXT
+
+	exit ${1:-0}
+}
+
+if ! T="$(getopt -o "h" --long "help,archive:,project:,repo:,skipgithub" -n "${pn}" -- "$@")"; then
+	usage 1 >&2
+fi
+eval set -- "${T}"
+
+while [ "$1" != -- ]; do
+	case "$1" in
+		--archive)
+			if ! echo "$2" | grep -qE '^(tar([.](gz|xz|bz2))?|zip)$'; then
+				echo "Unrecognised archive format." >&2
+				usage 1
+			fi
+			[ -n "${archive}" ] && archive+=" "
+			archive+="${2}"
+			shift 2
+			;;
+		--project|--repo|--upstream)
+			eval "${1:2}=\"\$2\""
+			shift 2
+			;;
+		--skipgithub)
+			eval "${1:2}=1"
+			shift
+			;;
+		-h|-?|--help)
+			usage
+			;;
+		*)
+			echo "Not sure how to process $1." >&2
+			usage 1
+			;;
+	esac
+done
+shift
+
+[ $# -ne 1 ] && usage 1 >&2
+version="$1"
+
+if ! echo "${version}" | grep -qE "^[0-9]+([.][0-9]+)*(-rc[1-9][0-9]*)?$"; then
+	echo "Version '${version}' doesn't look like a commonly known version number."
+	echo "Please report this format to https://github.com/jkroonza/release-script if correct."
+	echo "You now how 10 seconds to hit ^C to terminate using this as a version number."
+	sleep 10
+	echo "Proceeding anyway ..."
+fi
+
+if ! which git >/dev/null 2>&1; then
+	echo "Please install git." >&2
+	exit 2
+fi
+if [ -z "${skipgithub}" ] && ! which gh >/dev/null 2>&1; then
+	echo "Please install the gh CLI tool from https://github.com/cli/cli/ (your distribution may well have it packaged)." >&2
+	exit 2
+fi
+
+[ -z "${repo}" ] || cd "${repo}" || exit 2
+while [ ! -d .git ]; do
+	if [ "${PWD}" = / ]; then
+		echo "Unable to find top of the git repository from $path." >&2
+		exit 2
+	fi
+	cd ..
+done
+# we're now in the top of the git repo.
+
+echo "Found top of repo at ${PWD}"
+
+[ -z "${project}" ] && project=$(git config release-script.project)
+[ -z "${project}" ] && project=$(basename "${PWD}")
+
+[ -z "${archive}" ] && archive=$(git config release-script.archive)
+[ -z "${archive}" ] && archive="tar.gz"
+
+[ -z "${upstream}" ] && upstream=$(git config release-script.upstream)
+[ -z "${upstream}" ] && upstream=origin
+
+if [ -d "${project}-${version}" ]; then
+	echo "Directory ${project}-${version} already exist in top level of repository." >&2
+	exit 2
+fi
+
+if ! git tag "v${version}"; then
+	echo "Unable to create a version tag." >&2
+	#exit 2
+fi
+
+git push "${upstream}" "v${version}" || exit 2
+
+if ! git archive "v${version}" --prefix "${project}-${version}/" --output "${project}-${version}.tar"; then
+	echo "Unable to create ${project}-${version}.tar" >&2
+	exit 2
+fi
+
+if ! tar xf "${project}-${version}.tar"; then
+	echo "Error extracting archive." >&2
+	exit 2
+fi
+
+rm "${project}-${version}.tar"
+
+cd "${project}-${version}" || exit 2
+
+if [ -x "./autogen.sh" ]; then
+	./autogen.sh || exit 2
+fi
+
+cd ..
+
+tar cf "${project}-${version}.tar" "${project}-${version}/"
+keeptar=
+
+for a in ${archive}; do
+	case "${a}" in
+		tar.gz)
+			gzip -9 -k "${project}-${version}.tar" || exit 2
+			;;
+		tar.bz2)
+			bzip2 -9 -k "${project}-${version}.tar" || exit 2
+			;;
+		tar.bz2)
+			if which pbzip2 >/dev/null 2>&1; then
+				pbzip2 -9 -k "${project}-${version}.tar" || exit 2
+			else
+				bzip2 -9 -k "${project}-${version}.tar" || exit 2
+			fi
+			;;
+		tar)
+			keeptar=1
+			;;
+		zip)
+			zip -r ${project}-${version} ${project}-${version}/ || exit 2
+			;;
+		*)
+			echo "Don't know how to generate ${a} archive." >&2
+			exit 2
+			;;
+	esac
+done
+
+[ -z "${keeptar}" ] && rm "${project}-${version}.tar"
+rm -rf "${project}-${version}/"
+
+[ -n "${skipgithub}" ] && exit 0
+
+gh release create "v${version}" --generate-notes || exit 2
+
+for a in ${archive}; do
+	gh release upload "v${version}" "${project}-${version}.${a}" || exit 2
+done
